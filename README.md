@@ -82,14 +82,24 @@ bash tools/run_safeT_to_gguf.sh
 bash tools/run_llamacpp.sh
 ```
 
-脚本提供两种模式（默认开启多卡，单卡为注释段，可按需切换）：
+脚本提供 4 种模式（默认启用「模式 B」，其余为注释段，按需切换）。多卡张量并行（`-sm tensor`）的核心区别在 **AllReduce 后端**，由环境变量 `GGML_CUDA_ALLREDUCE` 控制：
 
-- **单卡**：`CUDA_VISIBLE_DEVICES=0`
-- **多卡**：`CUDA_VISIBLE_DEVICES=0,1` 并配合以下环境变量：
-  - `GGML_CUDA_P2P=1`：开启 GPU 间 P2P
-  - `CUDA_SCALE_LAUNCH_QUEUES=4x`：扩展 launch queue
+| 模式 | 切分方式 | AllReduce 后端 | 是否依赖 NCCL | PTX 可见性 |
+| --- | --- | --- | --- | --- |
+| A | 张量并行 `-sm tensor` | `nccl`：NVIDIA NCCL 库 | 是 | AllReduce 在闭源 `libnccl.so`，**dump 不到** |
+| **B（默认）** | 张量并行 `-sm tensor` | `internal`：llama.cpp/ggml 自带 CUDA kernel（`allreduce.cu`） | 否 | AllReduce 为自研 kernel，**可 dump** |
+| C | 层切分（pipeline） | 无 reduce | 否 | 无 AllReduce |
+| D | 单卡 | 无 | 否 | 无 AllReduce |
 
-`-ngl all` 表示将全部层 offload 到 GPU。**`model_path` 为硬编码**，使用前请改成你自己的 GGUF 路径。
+> 还有第三种 AllReduce：`GGML_CUDA_ALLREDUCE=none`，同样能做张量并行，但走 meta-backend 的通用 butterfly reduction（由 P2P copy + `GGML_OP_ADD` 标准算子拼出，见 [ggml-backend-meta.cpp](llama.cpp/ggml/src/ggml-backend-meta.cpp)），而非专用 AllReduce kernel。三者实际计算结果一致，仅通信实现不同。
+
+公共要点：
+
+- `-ngl all`：将全部层 offload 到 GPU。
+- `GGML_CUDA_P2P=1`：开启 GPU 间 P2P（多卡模式需要）。
+- `-sm tensor` 会**自动开启 flash_attn**（`SPLIT_MODE_TENSOR` 的硬性要求，见 [llama-context.cpp:3513](llama.cpp/src/llama-context.cpp#L3513)），无需手动加参数。该 flash attention 是 **llama.cpp 自研的 CUDA kernel**（`fattn*.cu/cuh`），**非**外部 Dao-AILab flash-attention 库，因此也在可 dump 范围内。
+- `LD_LIBRARY_PATH` 指向 `nccl/build/lib` 仅模式 A 需要；模式 B/C/D 可忽略。
+- **`model_path` 为硬编码**，使用前请改成你自己的 GGUF 路径。
 
 ---
 
