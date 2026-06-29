@@ -13,8 +13,11 @@ dump_llamacpp/
 ├── llama.cpp/              # git 子模块，上游 ggml-org/llama.cpp
 ├── tools/                  # 自定义辅助脚本
 │   ├── build_llamacpp.sh   # 编译 llama.cpp（CUDA）
-│   ├── run_safeT_to_gguf.sh# HF safetensors → GGUF 模型转换
-│   └── run_llamacpp.sh     # 用 llama-cli 跑推理（单卡 / 多卡）
+│   ├── run_safeT_to_gguf.sh          # HF safetensors → GGUF 模型转换
+│   ├── run_llamacpp_tensor.sh        # 模式 B：多卡张量并行（不依赖 NCCL）
+│   ├── run_llamacpp_tensor_nccl.sh   # 模式 A：多卡张量并行（NCCL）
+│   ├── run_llamacpp_layer.sh         # 模式 C：多卡层切分
+│   └── run_llamacpp_single.sh        # 模式 D：单卡
 ├── .gitmodules            # 子模块配置
 ├── LICENSE
 └── README.md
@@ -30,7 +33,7 @@ dump_llamacpp/
 - CUDA Toolkit（默认安装在 `/usr/local/cuda`）
 - CMake、C/C++ 编译器
 - Python 环境（用于模型转换，脚本默认 conda 环境 `torch251`）
-- 多卡场景：NCCL（编译时开启 `-DGGML_CUDA_NCCL=ON`）
+- NCCL 模式：需编译时开启 `-DGGML_CUDA_NCCL=ON`
 
 ---
 
@@ -76,22 +79,26 @@ bash tools/run_safeT_to_gguf.sh
 
 ### 4. 运行推理
 
-用 [tools/run_llamacpp.sh](tools/run_llamacpp.sh) 调用编译产物 `./build/bin/llama-cli`：
+运行脚本会调用编译产物 `./build/bin/llama-cli`，按场景直接选一个脚本：
 
 ```bash
-bash tools/run_llamacpp.sh
+bash tools/run_llamacpp_tensor.sh       # 模式 B：多卡张量并行，不依赖 NCCL
+bash tools/run_llamacpp_tensor_nccl.sh  # 模式 A：多卡张量并行，AllReduce 走 NCCL
+bash tools/run_llamacpp_layer.sh        # 模式 C：多卡层切分 pipeline
+bash tools/run_llamacpp_single.sh       # 模式 D：单卡
 ```
 
-脚本提供 4 种模式（默认启用「模式 B」，其余为注释段，按需切换）。多卡张量并行（`-sm tensor`）的核心区别在 **AllReduce 后端**，由环境变量 `GGML_CUDA_ALLREDUCE` 控制：
+多卡张量并行（`-sm tensor`）的核心区别在 **AllReduce 后端**，由环境变量 `GGML_CUDA_ALLREDUCE` 控制：
 
-| 模式 | 切分方式 | AllReduce 后端 | 是否依赖 NCCL | PTX 可见性 |
-| --- | --- | --- | --- | --- |
-| A | 张量并行 `-sm tensor` | `nccl`：NVIDIA NCCL 库 | 是 | AllReduce 在闭源 `libnccl.so`，**dump 不到** |
-| **B（默认）** | 张量并行 `-sm tensor` | `internal`：llama.cpp/ggml 自带 CUDA kernel（`allreduce.cu`） | 否 | AllReduce 为自研 kernel，**可 dump** |
-| C | 层切分（pipeline） | 无 reduce | 否 | 无 AllReduce |
-| D | 单卡 | 无 | 否 | 无 AllReduce |
+| 模式 | 脚本 | 切分方式 | AllReduce 后端 | 是否依赖 NCCL | PTX 可见性 |
+| --- | --- | --- | --- | --- | --- |
+| A | [tools/run_llamacpp_tensor_nccl.sh](tools/run_llamacpp_tensor_nccl.sh) | 张量并行 `-sm tensor` | `nccl`：NVIDIA NCCL 库 | 是 | AllReduce 在闭源 `libnccl.so`，**dump 不到** |
+| **B2（常用）** | [tools/run_llamacpp_tensor.sh](tools/run_llamacpp_tensor.sh) | 张量并行 `-sm tensor` | `none`：meta-backend butterfly reduction | 否 | 不走 NCCL，相关 CUDA 算子可 dump |
+| B1 | [tools/run_llamacpp_tensor.sh](tools/run_llamacpp_tensor.sh) | 张量并行 `-sm tensor` | `internal`：llama.cpp/ggml 自带 CUDA kernel（`allreduce.cu`） | 否 | AllReduce 为自研 kernel，**可 dump** |
+| C | [tools/run_llamacpp_layer.sh](tools/run_llamacpp_layer.sh) | 层切分（pipeline） | 无 reduce | 否 | 无 AllReduce |
+| D | [tools/run_llamacpp_single.sh](tools/run_llamacpp_single.sh) | 单卡 | 无 | 否 | 无 AllReduce |
 
-> 还有第三种 AllReduce：`GGML_CUDA_ALLREDUCE=none`，同样能做张量并行，但走 meta-backend 的通用 butterfly reduction（由 P2P copy + `GGML_OP_ADD` 标准算子拼出，见 [ggml-backend-meta.cpp](llama.cpp/ggml/src/ggml-backend-meta.cpp)），而非专用 AllReduce kernel。三者实际计算结果一致，仅通信实现不同。
+> [tools/run_llamacpp_tensor.sh](tools/run_llamacpp_tensor.sh) 默认启用 B2：`CUDA_VISIBLE_DEVICES=2,3,4,5` + `GGML_CUDA_ALLREDUCE=none`。如需测试 B1，可改成脚本中注释掉的双卡 `internal` 配置：`CUDA_VISIBLE_DEVICES=2,3` + `GGML_CUDA_ALLREDUCE=internal`。
 
 公共要点：
 
@@ -99,7 +106,7 @@ bash tools/run_llamacpp.sh
 - `GGML_CUDA_P2P=1`：开启 GPU 间 P2P（多卡模式需要）。
 - `-sm tensor` 会**自动开启 flash_attn**（`SPLIT_MODE_TENSOR` 的硬性要求，见 [llama-context.cpp:3513](llama.cpp/src/llama-context.cpp#L3513)），无需手动加参数。该 flash attention 是 **llama.cpp 自研的 CUDA kernel**（`fattn*.cu/cuh`），**非**外部 Dao-AILab flash-attention 库，因此也在可 dump 范围内。
 - `LD_LIBRARY_PATH` 指向 `nccl/build/lib` 仅模式 A 需要；模式 B/C/D 可忽略。
-- **`model_path` 为硬编码**，使用前请改成你自己的 GGUF 路径。
+- `model_path` 在脚本中给了默认值，也可运行时用 `MODEL_PATH=/path/to/model.gguf bash tools/run_llamacpp_tensor.sh` 覆盖。
 
 ---
 
@@ -109,7 +116,10 @@ bash tools/run_llamacpp.sh
 | --- | --- |
 | [tools/build_llamacpp.sh](tools/build_llamacpp.sh) | CUDA 配置 + 编译 llama.cpp |
 | [tools/run_safeT_to_gguf.sh](tools/run_safeT_to_gguf.sh) | safetensors → GGUF 模型转换 |
-| [tools/run_llamacpp.sh](tools/run_llamacpp.sh) | llama-cli 推理（单卡/多卡） |
+| [tools/run_llamacpp_tensor.sh](tools/run_llamacpp_tensor.sh) | llama-cli 推理：多卡张量并行（不依赖 NCCL） |
+| [tools/run_llamacpp_tensor_nccl.sh](tools/run_llamacpp_tensor_nccl.sh) | llama-cli 推理：多卡张量并行（NCCL） |
+| [tools/run_llamacpp_layer.sh](tools/run_llamacpp_layer.sh) | llama-cli 推理：多卡层切分 |
+| [tools/run_llamacpp_single.sh](tools/run_llamacpp_single.sh) | llama-cli 推理：单卡 |
 
 > 注意：脚本中的模型路径、`conda activate torch251`、CUDA 路径等均为当前环境的硬编码值，迁移到其它机器时需相应调整。
 
