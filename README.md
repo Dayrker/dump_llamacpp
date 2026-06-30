@@ -15,6 +15,7 @@ dump_llamacpp/
 │   ├── build_llamacpp.sh   # 编译 llama.cpp（CUDA）
 │   ├── run_safeT_to_gguf.sh          # HF safetensors → GGUF 模型转换
 │   ├── run_llamacpp_tensor.sh        # 模式 B：多卡张量并行（不依赖 NCCL）
+│   ├── dump_llamacpp_tensor.sh       # 张量并行 AllReduce PTX / 链路 dump
 │   ├── run_llamacpp_tensor_nccl.sh   # 模式 A：多卡张量并行（NCCL）
 │   ├── run_llamacpp_layer.sh         # 模式 C：多卡层切分
 │   └── run_llamacpp_single.sh        # 模式 D：单卡
@@ -88,6 +89,16 @@ bash tools/run_llamacpp_layer.sh        # 模式 C：多卡层切分 pipeline
 bash tools/run_llamacpp_single.sh       # 模式 D：单卡
 ```
 
+[tools/run_llamacpp_tensor.sh](tools/run_llamacpp_tensor.sh) 支持一键 dump 张量并行 AllReduce 相关信息：
+
+```bash
+bash tools/run_llamacpp_tensor.sh --dump-only none
+bash tools/run_llamacpp_tensor.sh --dump-only internal
+bash tools/run_llamacpp_tensor.sh --dump-only all
+```
+
+dump 输出位于 `dump/llamacpp_tensor/{none,internal}/`，按 `GGML_CUDA_ALLREDUCE` 分目录保存源码片段、compile command、PTX、PTX entry / 符号表、实现说明和调用链说明。`--dump` 会先生成 dump 再继续运行推理；`--dump-only` 只生成 dump，不启动大模型。
+
 多卡张量并行（`-sm tensor`）的核心区别在 **AllReduce 后端**，由环境变量 `GGML_CUDA_ALLREDUCE` 控制：
 
 | 模式 | 脚本 | 切分方式 | AllReduce 后端 | 是否依赖 NCCL | PTX 可见性 |
@@ -115,6 +126,7 @@ bash tools/run_llamacpp_single.sh       # 模式 D：单卡
 | 脚本 | 作用 |
 | --- | --- |
 | [tools/build_llamacpp.sh](tools/build_llamacpp.sh) | CUDA 配置 + 编译 llama.cpp |
+| [tools/dump_llamacpp_tensor.sh](tools/dump_llamacpp_tensor.sh) | dump 张量并行 AllReduce 的实现源码、PTX、符号和链路说明 |
 | [tools/run_safeT_to_gguf.sh](tools/run_safeT_to_gguf.sh) | safetensors → GGUF 模型转换 |
 | [tools/run_llamacpp_tensor.sh](tools/run_llamacpp_tensor.sh) | llama-cli 推理：多卡张量并行（不依赖 NCCL） |
 | [tools/run_llamacpp_tensor_nccl.sh](tools/run_llamacpp_tensor_nccl.sh) | llama-cli 推理：多卡张量并行（NCCL） |
