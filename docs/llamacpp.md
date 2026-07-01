@@ -574,6 +574,18 @@ for (; offset_j >= 1; offset_j /= 2) {
 }
 ```
 
+关键点：
+
+- `j_other = j ^ offset_j` 里的 `^` 是异或，用当前 `offset_j` 给每张卡找
+  一个 butterfly partner。
+- 每一轮 `offset_j` 都减半：例如 4 卡时先 `offset_j = 2`，配对
+  `0 <-> 2`、`1 <-> 3`；再 `offset_j = 1`，配对 `0 <-> 1`、
+  `2 <-> 3`。
+- 每一轮后，每张卡都多拿到一半设备的和；`log2(N)` 轮后，每张卡都有全量
+  sum。
+- `push_data(j, j_other, i_buf)` 的本质是把 `j` 的 tensor copy 到
+  `j_other` 的临时 buffer，再在 `j_other` 上用 `GGML_OP_ADD` 累加。
+
 结论：B2 的核心不是 `allreduce.cu`，而是 Meta backend 用
 `ggml_backend_tensor_copy_async()` + `GGML_OP_ADD` 拼出来的 generic butterfly
 reduction。
